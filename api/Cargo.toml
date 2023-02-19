@@ -1,0 +1,41 @@
+[package]
+name = "ccdeth_api"
+version = "1.0.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.13"
+chrono = "0.4"
+ethabi = "18"
+futures = "0.3"
+hex = "0.4"
+json = "0.12.1"
+log = "0.4"
+num-bigint = "0.4"
+rs_merkle = "1.2"
+secp256k1 = "0.21"
+serde = "1.0"
+serde_json = "1.0"
+sha2 = "0.10"
+sha3 = "0.10"
+thiserror = "1.0"
+url = "2.2"
+ethers = "1"
+clap = {version = "4", features = ["derive", "env"]}
+tokio = {version = "1.20", features = ["rt-multi-thread", "macros", "sync"]}
+env_logger = "0.9"
+tokio-postgres = { version = "^0.7.7", features = ["with-serde_json-1"] }
+postgres-types = { version = "0.2.4", features = ["derive"]}
+axum = {version = "0.6"}
+axum-prometheus = { version = "0.3" }
+tracing-subscriber = { version = "0.3" }
+tracing = { version = "0.1" }
+deadpool-postgres = { version = "0.10" }
+tower-http = {version = "0.3", features = ["trace", "timeout", "limit", "cors"]}
+utoipa = { version = "3"}
+
+ccdeth_relayer = { path = "../relayer"}
+concordium-rust-sdk = { path = "../deps/concordium-rust-sdk/" }
