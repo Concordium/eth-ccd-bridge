@@ -666,7 +666,7 @@ async fn list_tokens(
             eth_name: eth_name.clone(),
             decimals,
             ccd_contract: ContractAddress::new(child_index as u64, child_subindex as u64),
-            ccd_name: eth_name + ".et",
+            ccd_name: eth_name + ".eth",
         })
     }
     Ok(out.into())
