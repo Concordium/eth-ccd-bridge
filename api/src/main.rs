@@ -224,6 +224,7 @@ struct WalletDepositTx {
     origin_tx_hash:     TransactionHash,
     origin_event_index: u64,
     amount:             String,
+    timestamp: i64,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -237,6 +238,7 @@ struct WalletWithdrawTx {
     origin_event_index: u64,
     amount:             String,
     status:             WithdrawalStatus,
+    timestamp: i64,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -298,11 +300,13 @@ async fn wallet_transactions(
         let amount = withdraw.try_get::<_, String>("amount")?;
         let index = withdraw.try_get::<_, i64>("child_index")? as u64;
         let subindex = withdraw.try_get::<_, i64>("child_subindex")? as u64;
+        let timestamp = withdraw.try_get::<_, chrono::DateTime<chrono::Utc>>("insert_time")?.timestamp();
         out.push(WalletTx::Withdraw(WalletWithdrawTx {
             tx_hash,
             origin_tx_hash,
             origin_event_index,
             amount,
+            timestamp,
             status: if tx_hash.is_some() {
                 WithdrawalStatus::Processed
             } else {
@@ -318,6 +322,7 @@ async fn wallet_transactions(
         let origin_event_index = deposit.try_get::<_, i64>("origin_event_index")? as u64;
         let amount = deposit.try_get::<_, String>("amount")?;
         let root_token = deposit.try_get::<_, Fixed<20>>("root_token")?;
+        let timestamp = deposit.try_get::<_, chrono::DateTime<chrono::Utc>>("insert_time")?.timestamp();
         out.push(WalletTx::Deposit(WalletDepositTx {
             status: if tx_hash.is_some() {
                 TransactionStatus::Finalized
@@ -328,6 +333,7 @@ async fn wallet_transactions(
             origin_tx_hash,
             origin_event_index,
             amount,
+            timestamp,
             root_token: root_token.0.into(),
         }))
     }
@@ -408,7 +414,6 @@ async fn get_merkle_proof(
             .collect::<Result<Vec<_>, Error>>()?;
         // TODO: avoid collecting above. Just iterate over results once.
         let proof = ccdeth_relayer::merkle::make_proof(rows, tx_hash);
-        log::debug!("Constructed proof from rows {:#?}", proof);
         if let Some(proof) = proof {
             Ok(EthMerkleProofResponse {
                 params: WithdrawParams {
@@ -544,7 +549,7 @@ async fn watch_withdraw(
         }
     } else {
         Ok(axum::Json(WatchWithdrawalResponse {
-            status:              "unknown",
+            status:              "missing",
             concordium_event_id: None,
         }))
     }
@@ -670,13 +675,13 @@ impl QueryStatements {
                                 root IN (SELECT root FROM merkle_roots ORDER BY id DESC LIMIT 1)"
             .into();
         let get_withdrawals_for_address = (
-            "SELECT processed, tx_hash, child_index, child_subindex, amount, event_index FROM \
+            "SELECT insert_time, processed, tx_hash, child_index, child_subindex, amount, event_index FROM \
              concordium_events WHERE event_type = 'withdraw' AND receiver = $1"
                 .into(),
             tokio_postgres::types::Type::BYTEA,
         );
         let get_deposits_for_address = (
-            "SELECT tx_hash, root_token, tx_hash, amount, origin_tx_hash, origin_event_index FROM \
+            "SELECT insert_time, tx_hash, root_token, tx_hash, amount, origin_tx_hash, origin_event_index FROM \
              ethereum_deposit_events WHERE depositor = $1"
                 .into(),
             tokio_postgres::types::Type::BYTEA,
@@ -710,8 +715,8 @@ impl QueryStatements {
 pub enum TransactionStatus {
     /// Transaction was added to the database and not yet finalized.
     #[postgres(name = "pending")]
-    #[serde(rename = "transaction_pending")]
-    #[schema(rename = "transaction_pending")]
+    #[serde(rename = "pending")]
+    #[schema(rename = "pending")]
     Pending,
     /// Transaction was finalized.
     #[postgres(name = "failed")]
@@ -725,5 +730,6 @@ pub enum TransactionStatus {
     Finalized,
     #[postgres(name = "missing")]
     #[schema(rename = "missing")]
+    #[serde(rename = "missing")]
     Missing,
 }
