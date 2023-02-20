@@ -213,3 +213,17 @@ CREATE TABLE IF NOT EXISTS merkle_roots (
        id SERIAL8 PRIMARY KEY UNIQUE,
        root BYTEA NOT NULL
 );
+
+-- A type with exactly one value used to make sure there can only be one row in
+-- the expected_merkle_update table.
+DO $$ BEGIN
+CREATE TYPE unit AS ENUM (
+   ''
+   );
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+CREATE TABLE IF NOT EXISTS expected_merkle_update (
+       tag unit NOT NULL DEFAULT ('') UNIQUE,
+       expected_time timestamp with time zone NOT NULL
+);

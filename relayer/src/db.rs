@@ -81,6 +81,7 @@ struct PreparedStatements {
     mark_withdrawal_as_completed: Statement,
     get_pending_withdrawals:      Statement,
     get_max_event_index:          Statement,
+    set_expected_merkle_time:     Statement,
 }
 
 impl PreparedStatements {
@@ -266,6 +267,9 @@ pub enum DatabaseOperation {
         success:  bool,
         tx_hash:  H256,
     },
+    SetNextMerkleUpdateTime {
+        next_time: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, tokio_postgres::types::ToSql, tokio_postgres::types::FromSql)]
@@ -349,6 +353,13 @@ WHERE (processed IS NULL) AND event_type = 'withdraw' ORDER BY id ASC;",
         let get_max_event_index = client
             .prepare("SELECT MAX(event_index) FROM concordium_events WHERE (root IS NOT NULL);")
             .await?;
+        let set_expected_merkle_time = client
+            .prepare(
+                "INSERT INTO expected_merkle_update (expected_time) VALUES ($1)
+ON CONFLICT (unit) DO UPDATE SET expected_time = $1;
+",
+            )
+            .await?;
         let ethereum_checkpoint = client
             .query_opt(
                 "SELECT last_processed_height FROM checkpoints WHERE network = 'ethereum'",
@@ -379,6 +390,7 @@ WHERE (processed IS NULL) AND event_type = 'withdraw' ORDER BY id ASC;",
                 get_pending_withdrawals,
                 mark_withdrawal_as_completed,
                 get_max_event_index,
+                set_expected_merkle_time,
             },
         };
         Ok((
@@ -1264,6 +1276,20 @@ async fn insert_into_db(
                         success,
                         tx_hash,
                     },
+                ));
+            }
+        }
+        DatabaseOperation::SetNextMerkleUpdateTime { next_time } => {
+            if db
+                .client
+                .query_opt(&db.prepared_statements.set_expected_merkle_time, &[
+                    &next_time,
+                ])
+                .await
+                .is_err()
+            {
+                return Err(InsertError::Retry(
+                    DatabaseOperation::SetNextMerkleUpdateTime { next_time },
                 ));
             }
         }

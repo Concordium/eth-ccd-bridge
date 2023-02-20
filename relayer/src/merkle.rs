@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     concordium_contracts::WithdrawEvent,
-    db::{DatabaseOperation, MerkleUpdate},
+    db::{self, DatabaseOperation, MerkleUpdate},
     root_chain_manager::BridgeManager,
     state_sender,
 };
@@ -519,6 +519,20 @@ where
         client.update_interval,
     );
     send_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    if db_sender
+        .send(db::DatabaseOperation::SetNextMerkleUpdateTime {
+            next_time: chrono::Utc::now()
+                + chrono::Duration::from_std(send_interval.period())
+                    .map_err(|e| EthereumSenderError::Internal(e.into()))?,
+        })
+        .await
+        .is_err()
+    {
+        {
+            log::debug!("The database has been shut down. Stopping the transaction sender.");
+            return Ok(());
+        }
+    }
     'outer: loop {
         // Handle followup for any pending transaction first.
         if pending.is_some() {
@@ -699,6 +713,21 @@ where
                 SetMerkleRootResult::NoPendingWithdrawals => {
                     log::debug!("No pending withdrawals. Doing nothing.");
                 }
+            }
+        }
+        // Record in the database for next time we are going to attempt an update.
+        if db_sender
+            .send(db::DatabaseOperation::SetNextMerkleUpdateTime {
+                next_time: chrono::Utc::now()
+                    + chrono::Duration::from_std(send_interval.period())
+                        .map_err(|e| EthereumSenderError::Internal(e.into()))?,
+            })
+            .await
+            .is_err()
+        {
+            {
+                log::debug!("The database has been shut down. Stopping the transaction sender.");
+                return Ok(());
             }
         }
     }
