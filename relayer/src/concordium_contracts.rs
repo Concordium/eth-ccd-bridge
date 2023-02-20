@@ -632,11 +632,10 @@ pub async fn concordium_tx_sender(
                 Ok(false)
             } else if e.is_invalid_argument() {
                 log::error!(
-                    "Transaction {hash} is not valid for the current state of the node. Aborting."
+                    "Transaction {hash} is not valid for the current state of the node: {e:#}. Aborting."
                 );
                 anyhow::bail!(
-                    "Transaction {} is not valid for the current state of the node. Aborting.",
-                    hash
+                    "Transaction {hash} is not valid for the current state of the node: {e:#}. Aborting.",
                 )
             } else {
                 log::error!("Sending transaction to Concordium failed due to {e}.");

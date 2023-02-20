@@ -112,6 +112,7 @@ impl PreparedStatements {
         db_tx: &Transaction<'b>,
         tx_hash: &TransactionHash,
         event: &BridgeEvent,
+        merkle_hash: Option<[u8; 32]>,
     ) -> anyhow::Result<bool> {
         let (event_type, origin_event_index, data) = match event {
             BridgeEvent::TokenMap(tm) => {
@@ -175,6 +176,7 @@ impl PreparedStatements {
                         &Some(&we.eth_address[..]),
                         &Some(&we.amount.to_string()),
                         &contracts_common::to_bytes(we),
+                        &merkle_hash.as_ref().map(|x| &x[..]),
                     ])
                     .await?;
                 return Ok(res.get::<_, bool>(0));
@@ -201,6 +203,7 @@ impl PreparedStatements {
                 &None::<Vec<u8>>,
                 &None::<String>,
                 &data,
+                &merkle_hash.as_ref().map(|x| &x[..]),
             ])
             .await?;
         Ok(res.get::<_, bool>(0))
@@ -319,8 +322,9 @@ VALUES ($1, $2, $3, $4) RETURNING id",
         let insert_concordium_event = client
             .prepare(
                 "INSERT INTO concordium_events (tx_hash, event_index, origin_event_index, \
-                 event_type, child_index, child_subindex, receiver, amount, event_data, processed)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                 event_type, child_index, child_subindex, receiver, amount, event_data, \
+                 event_merkle_hash, processed)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         (CASE WHEN $4 = ('withdraw' :: concordium_event_type)
               THEN (SELECT tx_hash FROM ethereum_withdraw_events
                     WHERE ethereum_withdraw_events.origin_event_index = $2
@@ -721,13 +725,20 @@ VALUES ($1, $2, $3, $4, $5, (SELECT tx_hash FROM concordium_events
         let mut withdraws = Vec::new();
         for (tx_hash, events) in events {
             for event in events {
+                let mh = if let BridgeEvent::Withdraw(we) = &event {
+                    Some((
+                        we.event_index,
+                        crate::merkle::make_event_leaf_hash(*tx_hash, we)?,
+                    ))
+                } else {
+                    None
+                };
                 let processed = statements
-                    .insert_concordium_event(&db_tx, &tx_hash, &event)
+                    .insert_concordium_event(&db_tx, &tx_hash, &event, mh.map(|x| x.1))
                     .await?;
                 if !processed {
-                    if let BridgeEvent::Withdraw(we) = &event {
-                        let hash = crate::merkle::make_event_leaf_hash(*tx_hash, we)?;
-                        withdraws.push((we.event_index, hash));
+                    if let Some(p) = mh {
+                        withdraws.push(p);
                     };
                 }
             }
@@ -781,16 +792,16 @@ VALUES ($1, $2, $3, $4, $5, (SELECT tx_hash FROM concordium_events
 //     mut client: v2::Client,
 //     stop: tokio::sync::watch::Receiver<()>,
 // ) -> anyhow::Result<()> {
-//     // TODO: We could just be listening for blocks. But if there are no pending
-//     // transactions that is not efficient.
-//     let mut interval = tokio::time::interval(std::time::Duration::from_millis(10000));
-//     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-//     while !stop.has_changed().unwrap_or(true) {
-//         interval.tick().await;
+//     // TODO: We could just be listening for blocks. But if there are no
+// pending     // transactions that is not efficient.
+//     let mut interval =
+// tokio::time::interval(std::time::Duration::from_millis(10000));     interval.
+// set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);     while !
+// stop.has_changed().unwrap_or(true) {         interval.tick().await;
 //         let (response, receiver) = tokio::sync::oneshot::channel();
 //         db_actions
-//             .send(DatabaseOperation::GetPendingConcordiumTransactions { response })
-//             .await?;
+//             .send(DatabaseOperation::GetPendingConcordiumTransactions {
+// response })             .await?;
 //         let txs = receiver.await?;
 //         if !txs.is_empty() {
 //             log::debug!(
@@ -804,34 +815,34 @@ VALUES ($1, $2, $3, $4, $5, (SELECT tx_hash FROM concordium_events
 //                 Ok(s) => {
 //                     if let Some((block, outcome)) = s.is_finalized() {
 //                         if outcome.is_success() {
-//                             log::debug!("Transaction {} finalized in block {}.", tx_hash, block);
-//                             db_actions
-//                                 .send(DatabaseOperation::MarkConcordiumTransaction {
-//                                     tx_hash,
-//                                     state: TransactionStatus::Finalized,
-//                                 })
+//                             log::debug!("Transaction {} finalized in block
+// {}.", tx_hash, block);                             db_actions
+//
+// .send(DatabaseOperation::MarkConcordiumTransaction {
+// tx_hash,                                     state:
+// TransactionStatus::Finalized,                                 })
 //                                 .await?;
 //                         } else {
 //                             // TODO: Handle failure in some way.
 //                             // Transactions should generally not fail.
 //                             log::error!(
-//                                 "Transaction {} finalized in block {} but failed.",
-//                                 tx_hash,
+//                                 "Transaction {} finalized in block {} but
+// failed.",                                 tx_hash,
 //                                 block
 //                             );
 //                             db_actions
-//                                 .send(DatabaseOperation::MarkConcordiumTransaction {
-//                                     tx_hash,
-//                                     state: TransactionStatus::Failed,
-//                                 })
+//
+// .send(DatabaseOperation::MarkConcordiumTransaction {
+// tx_hash,                                     state:
+// TransactionStatus::Failed,                                 })
 //                                 .await?;
 //                         }
 //                     } // else nothing to do, wait until next time.
 //                 }
 //                 Err(e) if e.is_not_found() => {
-//                     log::error!("A transaction has gone missing {}.", tx_hash);
-//                     // TODO: Figure out how to resume. Missing transactions will mean failure.
-//                     db_actions
+//                     log::error!("A transaction has gone missing {}.",
+// tx_hash);                     // TODO: Figure out how to resume. Missing
+// transactions will mean failure.                     db_actions
 //                         .send(DatabaseOperation::MarkConcordiumTransaction {
 //                             tx_hash,
 //                             state: TransactionStatus::Missing,

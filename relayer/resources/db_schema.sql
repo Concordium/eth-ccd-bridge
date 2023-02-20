@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS concordium_events (
        -- Whether the withdrawal has already been completed. If so, then
        -- it is the hash of the transaction that completed it (withdrawn the tokens).
        processed BYTEA,
+       -- If withdraw event, the hash of it as a leaf in the Merkle tree. Otherwise NULL.
+       event_merkle_hash BYTEA,
        -- The latest Merkle root registered in the Ethereum contract that
        -- contains the event. Only applies to Withdraw events. NULL means that
        -- it is not yet registered.
@@ -113,6 +115,9 @@ CREATE TABLE IF NOT EXISTS concordium_events (
        -- root. Once that transaction is confirmed we clear the pending root and
        -- set the root instead.
        pending_root BYTEA,
+       -- Time when the event was first inserted into the database. This is when
+       -- it was discovered by the relayer.
+       insert_time timestamp with time zone NOT NULL DEFAULT NOW(),
        CONSTRAINT concordium_events_event_index_unique UNIQUE (event_index),
        CONSTRAINT concordium_events_origin_event_index_unique UNIQUE (origin_event_index)
        );
@@ -174,6 +179,9 @@ CREATE TABLE IF NOT EXISTS ethereum_deposit_events (
        -- If completed, this is the hash of the concordium transaction that did it.
        -- NULL otherwise.
        tx_hash BYTEA,
+       -- Time when the event was first inserted into the database. This is when
+       -- it was discovered by the relayer.
+       insert_time timestamp with time zone NOT NULL DEFAULT NOW(),
        CONSTRAINT ethereum_deposit_events_origin_event_index_unique UNIQUE (origin_event_index)
        );
 
