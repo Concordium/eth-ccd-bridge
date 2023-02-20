@@ -9,6 +9,7 @@ use concordium_rust_sdk as concordium;
 use postgres_types::FromSql;
 use std::sync::Arc;
 use tokio_postgres::NoTls;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse};
 use utoipa::{openapi::ObjectBuilder, OpenApi};
 
 #[derive(Parser, Debug)]
@@ -58,7 +59,8 @@ struct Api {
         watch_withdraw,
         list_tokens,
         wallet_transactions,
-        get_merkle_proof
+        get_merkle_proof,
+        expected_merkle_root_update,
     ),
     components(schemas(
         WatchTxResponse,
@@ -109,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::get(get_merkle_proof),
         )
         .route("/api/v1/tokens", axum::routing::get(list_tokens))
+        .route("/api/v1/expectedMerkleRootUpdate", axum::routing::get(expected_merkle_root_update))
         .route(
             "/api/v1/wallet/:wallet",
             axum::routing::get(wallet_transactions),
@@ -118,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::get(|| async move { Json(openapi) }),
         )
         .with_state(db)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().include_headers(true)).on_response(DefaultOnResponse::new().include_headers(true)))
         .layer(tower_http::timeout::TimeoutLayer::new(
             std::time::Duration::from_millis(app.request_timeout),
         ))
@@ -224,7 +227,7 @@ struct WalletDepositTx {
     origin_tx_hash:     TransactionHash,
     origin_event_index: u64,
     amount:             String,
-    timestamp: i64,
+    timestamp:          i64,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -238,7 +241,7 @@ struct WalletWithdrawTx {
     origin_event_index: u64,
     amount:             String,
     status:             WithdrawalStatus,
-    timestamp: i64,
+    timestamp:          i64,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -267,8 +270,10 @@ enum WalletTx {
             description = "Ethereum Wallet address.")
         ),
         responses(
-            (status = 200, description = "List wallet transactions.", body = [WalletTx])
-                )
+            (status = 200, description = "List wallet transactions.", body = [WalletTx]),
+            (status = 400, description = "Invalid request.", body = inline(String), content_type = "application/json"),
+            (status = 500, description = "Internal server error.", body = inline(String), content_type = "application/json"),
+        )
     )]
 async fn wallet_transactions(
     axum::extract::Path(wallet): axum::extract::Path<ethers::types::Address>,
@@ -300,7 +305,9 @@ async fn wallet_transactions(
         let amount = withdraw.try_get::<_, String>("amount")?;
         let index = withdraw.try_get::<_, i64>("child_index")? as u64;
         let subindex = withdraw.try_get::<_, i64>("child_subindex")? as u64;
-        let timestamp = withdraw.try_get::<_, chrono::DateTime<chrono::Utc>>("insert_time")?.timestamp();
+        let timestamp = withdraw
+            .try_get::<_, chrono::DateTime<chrono::Utc>>("insert_time")?
+            .timestamp();
         out.push(WalletTx::Withdraw(WalletWithdrawTx {
             tx_hash,
             origin_tx_hash,
@@ -322,7 +329,9 @@ async fn wallet_transactions(
         let origin_event_index = deposit.try_get::<_, i64>("origin_event_index")? as u64;
         let amount = deposit.try_get::<_, String>("amount")?;
         let root_token = deposit.try_get::<_, Fixed<20>>("root_token")?;
-        let timestamp = deposit.try_get::<_, chrono::DateTime<chrono::Utc>>("insert_time")?.timestamp();
+        let timestamp = deposit
+            .try_get::<_, chrono::DateTime<chrono::Utc>>("insert_time")?
+            .timestamp();
         out.push(WalletTx::Deposit(WalletDepositTx {
             status: if tx_hash.is_some() {
                 TransactionStatus::Finalized
@@ -374,7 +383,10 @@ struct EthMerkleProofResponse {
          description = "Event id.")
     ),
     responses(
-        (status = 200, description = "Proof.", body = Option<EthMerkleProofResponse>)
+        (status = 200, description = "Proof.", body = Option<EthMerkleProofResponse>),
+        (status = 400, description = "Invalid request.", body = inline(String), content_type = "application/json"),
+        (status = 404, description = "Transaction hash and event ID not found.", body = inline(String), content_type = "application/json"),
+        (status = 500, description = "Internal server error.", body = inline(String), content_type = "application/json"),
     )
 )]
 async fn get_merkle_proof(
@@ -440,6 +452,33 @@ async fn get_merkle_proof(
 
 #[utoipa::path(
         get,
+        path = "api/v1/expectedMerkleRootUpdate",
+        operation_id = "expected_merkle_root_update",
+        responses(
+            (status = 200, description = "Unix timestamp (in seconds) of the next scheduled update..", body = Option<i64>, content_type = "application/json"),
+            (status = 500, description = "Internal server error.", body = inline(String), content_type = "application/json")
+        )
+    )]
+/// Queried by Ethereum transaction hash, respond with the status of the
+/// corresponding transaction on Concordium that handles the deposit.
+pub async fn expected_merkle_root_update(
+    axum::extract::State(db): axum::extract::State<Database>,
+) -> Result<axum::Json<Option<i64>>, Error> {
+    let client = db.pool.get().await?;
+    let statement = &db.prepared_statements.get_next_merkle_root;
+    let statement = client.prepare_typed_cached(statement, &[]).await?;
+    let row = client.query_opt(&statement, &[]).await?;
+    match row {
+        None => Ok(None.into()),
+        Some(v) => {
+            let time = v.try_get::<_, chrono::DateTime<chrono::Utc>>("expected_time")?;
+            Ok(Some(time.timestamp()).into())
+        }
+    }
+}
+
+#[utoipa::path(
+        get,
         path = "api/v1/deposit/{tx_hash}",
         operation_id = "watch_deposit_tx",
         params(
@@ -448,15 +487,23 @@ async fn get_merkle_proof(
             description = "Hash of the transaction to query, in hex.")
         ),
         responses(
-            (status = 200, description = "Follow a deposit transaction.", body = WatchTxResponse)
-                )
+            (status = 200, description = "Follow a deposit transaction.", body = WatchTxResponse),
+            (status = 400, description = "Invalid request.", body = inline(String), content_type = "application/json"),
+            (status = 500, description = "Internal server error.", body = inline(String), content_type = "application/json")
+        )
     )]
 /// Queried by Ethereum transaction hash, respond with the status of the
 /// corresponding transaction on Concordium that handles the deposit.
 pub async fn watch_deposit(
-    path: axum::extract::Path<ethers::types::H256>,
+    path: Result<axum::extract::Path<ethers::types::H256>, axum::extract::rejection::PathRejection>,
     axum::extract::State(db): axum::extract::State<Database>,
 ) -> Result<axum::Json<WatchTxResponse>, Error> {
+    let path = match path {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(Error::InvalidRequest(e.to_string()));
+        }
+    };
     let span = tracing::debug_span!(
         "watch_deposit",
         time = chrono::Utc::now().timestamp_millis()
@@ -511,13 +558,21 @@ struct WatchWithdrawalResponse {
             description = "Hash of the transaction to query, in hex.")
         ),
         responses(
-            (status = 200, description = "Follow a withdraw transaction.", body = WatchWithdrawalResponse)
-                )
+            (status = 200, description = "Follow a withdraw transaction.", body = WatchWithdrawalResponse),
+            (status = 400, description = "Invalid request.", body = inline(String), content_type = "application/json"),
+            (status = 500, description = "Internal server error.", body = inline(String), content_type = "application/json")
+        )
     )]
 async fn watch_withdraw(
-    path: axum::extract::Path<TransactionHash>,
+    path: Result<axum::extract::Path<TransactionHash>, axum::extract::rejection::PathRejection>,
     axum::extract::State(db): axum::extract::State<Database>,
 ) -> Result<axum::Json<WatchWithdrawalResponse>, Error> {
+    let path = match path {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(Error::InvalidRequest(e.to_string()));
+        }
+    };
     let span = tracing::debug_span!(
         "watch_withdraw",
         time = chrono::Utc::now().timestamp_millis()
@@ -585,8 +640,9 @@ fn contract_address() -> utoipa::openapi::Object {
         path = "api/v1/tokens",
         operation_id = "list_tokens",
         responses(
-            (status = 200, description = "List mapped tokens.", body = [TokenMapItem])
-                )
+            (status = 200, description = "List mapped tokens.", body = [TokenMapItem]),
+            (status = 500, description = "Internal server error.", body = inline(String), content_type = "application/json")
+        )
     )]
 async fn list_tokens(
     axum::extract::State(db): axum::extract::State<Database>,
@@ -610,7 +666,7 @@ async fn list_tokens(
             eth_name: eth_name.clone(),
             decimals,
             ccd_contract: ContractAddress::new(child_index as u64, child_subindex as u64),
-            ccd_name: eth_name, // TODO
+            ccd_name: eth_name + ".et",
         })
     }
     Ok(out.into())
@@ -650,6 +706,7 @@ struct QueryStatements {
     get_withdrawals_for_address: (String, tokio_postgres::types::Type),
     get_deposits_for_address:    (String, tokio_postgres::types::Type),
     list_tokens:                 String,
+    get_next_merkle_root:        String,
 }
 
 impl QueryStatements {
@@ -675,20 +732,22 @@ impl QueryStatements {
                                 root IN (SELECT root FROM merkle_roots ORDER BY id DESC LIMIT 1)"
             .into();
         let get_withdrawals_for_address = (
-            "SELECT insert_time, processed, tx_hash, child_index, child_subindex, amount, event_index FROM \
-             concordium_events WHERE event_type = 'withdraw' AND receiver = $1"
+            "SELECT insert_time, processed, tx_hash, child_index, child_subindex, amount, \
+             event_index FROM concordium_events WHERE event_type = 'withdraw' AND receiver = $1"
                 .into(),
             tokio_postgres::types::Type::BYTEA,
         );
         let get_deposits_for_address = (
-            "SELECT insert_time, tx_hash, root_token, tx_hash, amount, origin_tx_hash, origin_event_index FROM \
-             ethereum_deposit_events WHERE depositor = $1"
+            "SELECT insert_time, tx_hash, root_token, tx_hash, amount, origin_tx_hash, \
+             origin_event_index FROM ethereum_deposit_events WHERE depositor = $1"
                 .into(),
             tokio_postgres::types::Type::BYTEA,
         );
         let list_tokens = "SELECT root, child_index, child_subindex, eth_name, decimals FROM \
                            token_maps ORDER BY id ASC"
             .into();
+        let get_next_merkle_root =
+            "SELECT expected_time FROM expected_merkle_update WHERE tag = ''".into();
         Self {
             concordium_tx_status,
             withdrawal_status,
@@ -697,6 +756,7 @@ impl QueryStatements {
             get_withdrawals_for_address,
             get_deposits_for_address,
             list_tokens,
+            get_next_merkle_root,
         }
     }
 }
