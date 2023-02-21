@@ -197,6 +197,7 @@ async fn get_eth_block_events<M: Middleware + 'static>(
                         delay.as_secs()
                     );
                     retry_num += 1;
+                    tokio::time::sleep(delay).await;
                 }
             }
         }

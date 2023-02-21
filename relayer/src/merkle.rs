@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     concordium_contracts::WithdrawEvent,
-    db::{self, DatabaseOperation, MerkleUpdate},
+    db::{self, DatabaseOperation, MerkleUpdate, PendingEthereumTransaction},
     root_chain_manager::BridgeManager,
     state_sender,
 };
@@ -189,14 +189,16 @@ impl<M, S> MerkleSetterClient<M, S> {
         max_gas_price: U256,
         max_gas: U256,
         next_nonce: U256,
-        pending_merkle_set: &Option<(H256, ethers::prelude::Bytes, u64, [u8; 32], Vec<u64>)>,
+        pending_merkle_set: &Option<db::PendingEthereumTransaction>,
         update_interval: std::time::Duration,
         pending_withdrawals: Vec<(TransactionHash, WithdrawEvent)>,
         max_marked_event_index: Option<u64>,
     ) -> anyhow::Result<Self> {
-        let next_nonce = if let Some((_, bytes, _, _, _)) = pending_merkle_set {
+        let next_nonce = if let Some(PendingEthereumTransaction { raw_tx: data, .. }) =
+            pending_merkle_set
+        {
             let (tx, sig) = ethers::types::transaction::eip2718::TypedTransaction::decode_signed(
-                &Rlp::new(&bytes),
+                &Rlp::new(&data),
             )?;
             log::debug!(
                 "There is a pending Ethereum transaction with hash {:#x}. Using it's nonce as the \
@@ -345,7 +347,7 @@ where
 /// tree updates to update its in-memory state.
 pub async fn send_merkle_root_updates<M: Middleware + 'static, S: Signer + 'static>(
     client: MerkleSetterClient<M, S>,
-    pending_merkle_set: Option<(H256, ethers::prelude::Bytes, u64, [u8; 32], Vec<u64>)>,
+    pending_merkle_set: Option<PendingEthereumTransaction>,
     mut receiver: tokio::sync::mpsc::Receiver<MerkleUpdate>,
     db_sender: tokio::sync::mpsc::Sender<DatabaseOperation>,
     num_confirmations: u64,
@@ -356,7 +358,14 @@ where
     S::Error: 'static, {
     let mut pending = None;
     // Check if we need to resubmit the pending transaction.
-    if let Some((tx_hash, raw_tx, _timestamp, root, ids)) = pending_merkle_set {
+    if let Some(PendingEthereumTransaction {
+        tx_hash,
+        raw_tx,
+        timestamp: _,
+        root,
+        idxs,
+    }) = pending_merkle_set
+    {
         let ethereum_client = client.root_manager.client();
         let status = ethereum_client
             .get_transaction(tx_hash)
@@ -372,7 +381,7 @@ where
                 .await
                 .context("Unable to send raw transaction.")?;
         }
-        pending = Some((tx_hash, root, ids))
+        pending = Some((tx_hash, root, idxs))
     }
     let leaves = client.current_leaves.clone();
     let sender_handle = tokio::spawn(ethereum_tx_sender(

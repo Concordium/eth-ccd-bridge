@@ -309,11 +309,12 @@ async fn main() -> anyhow::Result<()> {
             .last_finalized_block;
         let bi = concordium_client.get_block_info(lfb).await?.response;
         if chrono::Utc::now().signed_duration_since(bi.block_slot_time)
-            > chrono::Duration::seconds(120)
+            > chrono::Duration::seconds(app.max_behind.into())
         {
             anyhow::bail!(
-                "Unable to start. The last finalized time of the Concordium node is more than \
-                 2min in the past."
+                "Unable to start. The last finalized time of the Concordium node is more than {}s \
+                 in the past.",
+                app.max_behind,
             );
         }
     }
@@ -345,9 +346,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     log::info!(
-        "Found starting point at start {}, end {})",
-        start_number,
-        upper_number,
+        "Found starting point on Ethereum chain at start = {start_number}, end ={upper_number})"
     );
     let concordium_start_height = find_concordium_start_height(
         concordium_client.clone(),

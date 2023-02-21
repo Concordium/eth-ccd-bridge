@@ -455,19 +455,26 @@ pub async fn listen_concordium(
     max_behind: u32,
 ) -> anyhow::Result<()> {
     let mut retry_attempt = 0;
+    let mut last_height = height;
     loop {
-        match listen_concordium_worker(
+        let res = listen_concordium_worker(
             &mut bridge_manager,
             &sender,
             &mut height,
             max_parallel,
             max_behind,
         )
-        .await
-        {
+        .await;
+
+        // If the last query did something clear the retry counter.
+        if height > last_height {
+            last_height = height;
+            retry_attempt = 0;
+        }
+        match res {
             Ok(()) => {
-                retry_attempt = 0;
-                log::info!("Terminated listening for new Concordium events.")
+                log::info!("Terminated listening for new Concordium events.");
+                return Ok(());
             }
             Err(e) => match e {
                 NodeError::Timeout => {
@@ -481,6 +488,7 @@ pub async fn listen_concordium(
                         "Querying the node timed out. Will attempt again in {} seconds..",
                         delay.as_secs()
                     );
+                    tokio::time::sleep(delay).await;
                 }
                 NodeError::QueryError(e) => {
                     retry_attempt += 1;
@@ -494,19 +502,19 @@ pub async fn listen_concordium(
                         e,
                         delay.as_secs()
                     );
+                    tokio::time::sleep(delay).await;
                 }
                 NodeError::Internal(e) => {
                     log::error!("Internal configuration error: {e}. Terminating the query task.");
                     return Err(e);
                 }
             },
-        }
+        };
     }
 }
 
 /// Return Err if querying the node failed.
 /// Return Ok(()) if the channel to the database was closed.
-/// TODO: Documentation and retries here.
 async fn listen_concordium_worker(
     // The client used to query the chain.
     bridge_manager: &mut BridgeManagerClient,
@@ -532,7 +540,8 @@ async fn listen_concordium_worker(
         let mut futures = futures::stream::FuturesOrdered::new();
         for fb in chunk {
             let mut node = bridge_manager.client.clone();
-            futures.push_back(async move {
+            // A future to query the block at the given hash.
+            let poller = async move {
                 let binfo = node.get_block_info(fb.block_hash).await?;
                 let events = if binfo.response.transaction_count == 0 {
                     Vec::new()
@@ -544,7 +553,8 @@ async fn listen_concordium_worker(
                         .await?
                 };
                 Ok::<(BlockInfo, Vec<BlockItemSummary>), QueryError>((binfo.response, events))
-            });
+            };
+            futures.push_back(poller);
         }
 
         while let Some(result) = futures.next().await {
@@ -646,7 +656,7 @@ pub async fn concordium_tx_sender(
         }
     };
 
-    while let Some(bi) = tokio::select! {
+    'outer: while let Some(bi) = tokio::select! {
         // Make sure to process all events that are in the queue before shutting down.
         // Thus prioritize getting things from the channel.
         // This only works in combination with the fact that we shut down senders
@@ -664,8 +674,7 @@ pub async fn concordium_tx_sender(
                 // if the stop sender has been dropped we should terminate since that
                 // should be the last thing that happens in the program.
                 if stop.has_changed().unwrap_or(true) {
-                    log::info!("The service is requesting to terminate. Not retrying.");
-                    return Ok(());
+                    break 'outer;
                 }
                 let delay = std::time::Duration::from_secs(5 << i);
                 log::error!(

@@ -272,6 +272,20 @@ pub enum DatabaseOperation {
     },
 }
 
+/// A pending Ethereum transaction stored in the Database.
+pub struct PendingEthereumTransaction {
+    /// Hash of the transaction.
+    pub tx_hash:   H256,
+    /// The full transaction, signed.
+    pub raw_tx:      ethers::prelude::Bytes,
+    /// Timestamp (in seconds) of when the transaction was stored.
+    pub timestamp: u64,
+    /// The Merkle root set by this transaction.
+    pub root:      [u8; 32],
+    /// Event indices set by this Merkle root.
+    pub idxs:      Vec<u64>,
+}
+
 #[derive(Debug, tokio_postgres::types::ToSql, tokio_postgres::types::FromSql)]
 #[postgres(name = "concordium_event_type")]
 pub enum ConcordiumEventType {
@@ -356,7 +370,7 @@ WHERE (processed IS NULL) AND event_type = 'withdraw' ORDER BY id ASC;",
         let set_expected_merkle_time = client
             .prepare(
                 "INSERT INTO expected_merkle_update (expected_time) VALUES ($1)
-ON CONFLICT (unit) DO UPDATE SET expected_time = $1;
+ON CONFLICT (tag) DO UPDATE SET expected_time = $1;
 ",
             )
             .await?;
@@ -503,9 +517,7 @@ ON CONFLICT (unit) DO UPDATE SET expected_time = $1;
     /// Get the transaction hash, the data, and the timestamp when
     /// the transaction was inserted to the database, in case
     /// a pending transaction exists.
-    pub async fn pending_ethereum_tx(
-        &self,
-    ) -> anyhow::Result<Option<(H256, ethers::prelude::Bytes, u64, [u8; 32], Vec<u64>)>> {
+    pub async fn pending_ethereum_tx(&self) -> anyhow::Result<Option<PendingEthereumTransaction>> {
         let rows = self
             .client
             .query_opt(&self.prepared_statements.get_pending_ethereum_txs, &[])
@@ -541,15 +553,15 @@ ON CONFLICT (unit) DO UPDATE SET expected_time = $1;
                 "A pending transaction without any indices. This is a database invariant \
                  violation.",
             )?;
-            Ok(Some((
-                H256(tx_hash.try_into().map_err(|_| {
+            Ok(Some(PendingEthereumTransaction {
+                tx_hash: H256(tx_hash.try_into().map_err(|_| {
                     anyhow::anyhow!("Database invariant violation. Hash not 32 bytes")
                 })?),
-                tx.into(),
+                raw_tx: tx.into(),
                 timestamp,
                 root,
                 idxs,
-            )))
+            }))
         } else {
             Ok(None)
         }
