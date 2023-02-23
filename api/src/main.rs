@@ -729,7 +729,8 @@ impl QueryStatements {
             ],
         );
         let get_merkle_leafs = "SELECT tx_hash, event_merkle_hash FROM concordium_events WHERE \
-                                root IN (SELECT root FROM merkle_roots ORDER BY id DESC LIMIT 1)"
+                                root IN (SELECT root FROM merkle_roots ORDER BY id DESC LIMIT 1) \
+                                ORDER BY event_index ASC"
             .into();
         let get_withdrawals_for_address = (
             "SELECT insert_time, processed, tx_hash, child_index, child_subindex, amount, \
