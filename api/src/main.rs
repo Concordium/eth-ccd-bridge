@@ -542,7 +542,7 @@ pub async fn watch_deposit(
 
 #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 struct WatchWithdrawalResponse {
-    status:              &'static str,
+    status:              TransactionStatus,
     concordium_event_id: Option<u64>,
 }
 
@@ -592,9 +592,9 @@ async fn watch_withdraw(
             let event_index = first.try_get::<_, Option<i64>>("event_index")?;
             Ok(axum::Json(WatchWithdrawalResponse {
                 status:              if processed.is_some() {
-                    "processed"
+                    TransactionStatus::Finalized
                 } else {
-                    "pending"
+                    TransactionStatus::Pending
                 },
                 concordium_event_id: event_index.map(|x| x as u64),
             }))
@@ -604,7 +604,7 @@ async fn watch_withdraw(
         }
     } else {
         Ok(axum::Json(WatchWithdrawalResponse {
-            status:              "missing",
+            status:              TransactionStatus::Missing,
             concordium_event_id: None,
         }))
     }
